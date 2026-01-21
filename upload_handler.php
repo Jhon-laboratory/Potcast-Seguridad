@@ -85,12 +85,11 @@ function registerSftpFileInDatabase($filename, $title, $description, $category, 
     $conn = $connection['conn'];
     
     try {
-        // Insertar directamente en la tabla Vistas
-        $sql = "INSERT INTO [DPL].[externos].[Vistas] (name, descripcion, embeded, Vistas, Likes, Ultimavista) 
-                VALUES (?, ?, NULL, 0, 0, GETDATE())";
+        // Insertar directamente en la tabla Vistas con nombre_archivo
+        $sql = "INSERT INTO [DPL].[externos].[Vistas] (name, descripcion, embeded, Vistas, Likes, Ultimavista, nombre_archivo) 
+                VALUES (?, ?, NULL, 0, 0, GETDATE(), ?)";
         
-        // Usar sftp:// como referencia para archivos SFTP
-        $params = array($title, $description);
+        $params = array($title, $description, $filename);
         $stmt = sqlsrv_prepare($conn, $sql, $params);
         
         if ($stmt === false || !sqlsrv_execute($stmt)) {

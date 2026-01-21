@@ -156,23 +156,26 @@ function getSFTPFiles() {
             }
             
             // Obtener estadísticas de la base de datos usando el nombre del archivo
-            $stats = getMediaStatsByName($file, 'sftp');
+            $stats = getMediaStatsByFilename($file, 'sftp');
+            
+            // Usar el nombre de la tabla (columna 'name') si existe
+            $title = $stats['name'] ?? ucfirst(str_replace(['_', '-'], ' ', pathinfo($file, PATHINFO_FILENAME)));
             
             $media_files[] = [
                 'id' => $stats['id'] ?? md5($file),
                 'db_id' => $stats['id'] ?? null,
                 'filename' => $file,
-                'title' => $stats['name'] ?? ucfirst(str_replace(['_', '-'], ' ', pathinfo($file, PATHINFO_FILENAME))),
+                'title' => $title,
                 'type' => $file_type,
                 'extension' => strtoupper($extension),
                 'size' => $stat['size'],
                 'modified' => $stat['mtime'],
                 'url' => "stream.php?file=" . urlencode($file),
-                'thumbnail' => getThumbnailForFile($file_type, $extension, $stats['name'] ?? ''),
+                'thumbnail' => getThumbnailForFile($file_type, $extension, $title),
                 'description' => $stats['descripcion'] ?? 'Archivo multimedia del servidor',
                 'views' => $stats['views'] ?? 0,
                 'likes' => $stats['likes'] ?? 0,
-                'date' => date('d/m/Y H:i', $stat['mtime']),
+                'date' => $stats['fecha'] ?? date('d/m/Y H:i', $stat['mtime']),
                 'original_name' => $file
             ];
         }
@@ -181,6 +184,64 @@ function getSFTPFiles() {
         
     } catch (Exception $e) {
         return ['success' => false, 'error' => 'Error al leer archivos SFTP: ' . $e->getMessage()];
+    }
+}
+
+// Obtener estadísticas de medios por nombre de archivo (NUEVA FUNCIÓN)
+function getMediaStatsByFilename($filename, $source) {
+    $connection = connectSQLServer();
+    if (!$connection['success']) {
+        return ['id' => null, 'views' => 0, 'likes' => 0];
+    }
+    
+    $conn = $connection['conn'];
+    
+    try {
+        // Buscar por nombre_archivo (la nueva columna que creaste)
+        $sql = "SELECT id, name, descripcion, Vistas AS views, Likes AS likes, 
+                       CONVERT(VARCHAR, Ultimavista, 103) + ' ' + CONVERT(VARCHAR, Ultimavista, 108) as fecha_formateada
+                FROM [DPL].[externos].[Vistas] 
+                WHERE nombre_archivo = ?";
+        
+        $params = array($filename);
+        $stmt = sqlsrv_query($conn, $sql, $params);
+        
+        if ($stmt === false) {
+            // Si falla, intentar buscar por nombre similar
+            $search_name = '%' . $filename . '%';
+            $sql = "SELECT id, name, descripcion, Vistas AS views, Likes AS likes,
+                           CONVERT(VARCHAR, Ultimavista, 103) + ' ' + CONVERT(VARCHAR, Ultimavista, 108) as fecha_formateada
+                    FROM [DPL].[externos].[Vistas] 
+                    WHERE nombre_archivo LIKE ? OR descripcion LIKE ?";
+            
+            $params = array($search_name, $search_name);
+            $stmt = sqlsrv_query($conn, $sql, $params);
+        }
+        
+        if ($stmt === false) {
+            return ['id' => null, 'views' => 0, 'likes' => 0];
+        }
+        
+        if ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
+            $stats = [
+                'id' => $row['id'],
+                'name' => $row['name'],
+                'descripcion' => $row['descripcion'],
+                'views' => $row['views'],
+                'likes' => $row['likes'],
+                'fecha' => $row['fecha_formateada'] ?? date('d/m/Y H:i')
+            ];
+        } else {
+            $stats = ['id' => null, 'views' => 0, 'likes' => 0];
+        }
+        
+        sqlsrv_free_stmt($stmt);
+        sqlsrv_close($conn);
+        
+        return $stats;
+        
+    } catch (Exception $e) {
+        return ['id' => null, 'views' => 0, 'likes' => 0];
     }
 }
 
@@ -201,7 +262,7 @@ function getSpotifyEmbeds() {
                     v.embeded AS embed_code,
                     v.Vistas AS views,
                     v.Likes AS likes,
-                    v.Ultimavista AS FechaCreacion
+                    CONVERT(VARCHAR, v.Ultimavista, 103) + ' ' + CONVERT(VARCHAR, v.Ultimavista, 108) as fecha_formateada
                 FROM [DPL].[externos].[Vistas] v
                 WHERE v.embeded LIKE '%spotify.com/embed%'
                 ORDER BY v.Ultimavista DESC";
@@ -215,19 +276,15 @@ function getSpotifyEmbeds() {
         $embeds = [];
         
         while ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
-            // Extraer ID de Spotify del embed code
-            $spotify_id = extractSpotifyId($row['embed_code']);
-            
             $embeds[] = [
                 'id' => 'spotify_' . $row['id'],
                 'db_id' => $row['id'],
                 'title' => $row['title'],
                 'embed_code' => $row['embed_code'],
-                'spotify_id' => $spotify_id,
-                'FechaCreacion' => $row['FechaCreacion'] ? $row['FechaCreacion']->format('Y-m-d H:i:s') : date('Y-m-d H:i:s'),
+                'FechaCreacion' => $row['fecha_formateada'] ?? date('d/m/Y H:i:s'),
                 'views' => $row['views'],
                 'likes' => $row['likes'],
-                'date' => $row['FechaCreacion'] ? date('d/m/Y H:i', strtotime($row['FechaCreacion']->format('Y-m-d H:i:s'))) : date('d/m/Y H:i'),
+                'date' => $row['fecha_formateada'] ?? date('d/m/Y H:i'),
                 'description' => $row['descripcion'] ?? 'Embed de Spotify',
                 'type' => 'audio',
                 'extension' => 'SPOTIFY',
@@ -243,52 +300,6 @@ function getSpotifyEmbeds() {
         
     } catch (Exception $e) {
         return ['success' => false, 'error' => 'Error al obtener embeds: ' . $e->getMessage()];
-    }
-}
-
-// Obtener estadísticas de medios por nombre (para archivos SFTP)
-function getMediaStatsByName($filename, $source) {
-    $connection = connectSQLServer();
-    if (!$connection['success']) {
-        return ['id' => null, 'views' => 0, 'likes' => 0];
-    }
-    
-    $conn = $connection['conn'];
-    
-    try {
-        // Buscar por nombre (sin prefijo [SFTP])
-        $search_name = '%' . $filename . '%';
-        $sql = "SELECT id, name, descripcion, Vistas AS views, Likes AS likes 
-                FROM [DPL].[externos].[Vistas] 
-                WHERE (embeded LIKE 'sftp://%' OR embeded IS NULL) 
-                AND name LIKE ?";
-        
-        $params = array($search_name);
-        $stmt = sqlsrv_query($conn, $sql, $params);
-        
-        if ($stmt === false) {
-            return ['id' => null, 'views' => 0, 'likes' => 0];
-        }
-        
-        if ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
-            $stats = [
-                'id' => $row['id'],
-                'name' => $row['name'],
-                'descripcion' => $row['descripcion'],
-                'views' => $row['views'],
-                'likes' => $row['likes']
-            ];
-        } else {
-            $stats = ['id' => null, 'views' => 0, 'likes' => 0];
-        }
-        
-        sqlsrv_free_stmt($stmt);
-        sqlsrv_close($conn);
-        
-        return $stats;
-        
-    } catch (Exception $e) {
-        return ['id' => null, 'views' => 0, 'likes' => 0];
     }
 }
 
@@ -375,9 +386,9 @@ function saveSpotifyEmbed($title, $embedCode, $description = '') {
     $conn = $connection['conn'];
     
     try {
-        // Insertar directamente en Vistas
-        $sql = "INSERT INTO [DPL].[externos].[Vistas] (name, descripcion, embeded, Vistas, Likes, Ultimavista) 
-                VALUES (?, ?, ?, 0, 0, GETDATE())";
+        // Insertar directamente en Vistas - nombre_archivo será NULL para Spotify
+        $sql = "INSERT INTO [DPL].[externos].[Vistas] (name, descripcion, embeded, Vistas, Likes, Ultimavista, nombre_archivo) 
+                VALUES (?, ?, ?, 0, 0, GETDATE(), NULL)";
         
         $params = array($title, $description, $embedCode);
         $stmt = sqlsrv_prepare($conn, $sql, $params);
@@ -410,26 +421,38 @@ function saveSpotifyEmbed($title, $embedCode, $description = '') {
 
 // Obtener thumbnail según tipo de archivo
 function getThumbnailForFile($type, $extension, $title = '') {
-    // Imágenes específicas para diferentes tipos
+    // Imágenes específicas para diferentes tipos - TEMAS INDUSTRIALES/CAPACITACIÓN
     $thumbnails = [
         'video' => [
-            'default' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'mp4' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'avi' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'mov' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'mkv' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80'
+            'default' => 'https://images.unsplash.com/photo-1497366754035-f200968a6e72?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mp4' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'avi' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mov' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mkv' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'capacitacion' => 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'seguridad' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'procedimientos' => 'https://images.unsplash.com/photo-1581091226033-d5c48150dbaa?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80'
         ],
         'audio' => [
-            'default' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'mp3' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'wav' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'ogg' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'm4a' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'default' => 'https://images.unsplash.com/photo-1546435770-a3e426bf472b?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mp3' => 'https://images.unsplash.com/photo-1546435770-a3e426bf472b?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'wav' => 'https://images.unsplash.com/photo-1546435770-a3e426bf472b?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'ogg' => 'https://images.unsplash.com/photo-1546435770-a3e426bf472b?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'm4a' => 'https://images.unsplash.com/photo-1546435770-a3e426bf472b?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
             'spotify' => 'https://images.unsplash.com/photo-1611339555312-e607c8352fd7?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80'
         ]
     ];
     
     if ($type === 'video') {
+        // Verificar si el título contiene palabras clave
+        $title_lower = strtolower($title);
+        if (strpos($title_lower, 'capacitación') !== false || strpos($title_lower, 'capacitacion') !== false) {
+            return $thumbnails['video']['capacitacion'];
+        } elseif (strpos($title_lower, 'seguridad') !== false) {
+            return $thumbnails['video']['seguridad'];
+        } elseif (strpos($title_lower, 'procedimiento') !== false) {
+            return $thumbnails['video']['procedimientos'];
+        }
         return $thumbnails['video'][$extension] ?? $thumbnails['video']['default'];
     } elseif ($type === 'audio') {
         if ($extension === 'spotify') {
@@ -516,19 +539,36 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
     
     <!-- CSS ESPECÍFICO SOLO PARA DASHBOARD -->
     <style>
-        /* Fondo específico para esta página */
+        /* Fondo sólido para el body */
         body.nav-md {
-            background: linear-gradient(rgba(245, 247, 250, 0.97), rgba(245, 247, 250, 0.97)), 
-                        url('img/imglogin.jpg') center/cover no-repeat fixed;
+            background: #f5f7fa !important;
             min-height: 100vh;
         }
         
-        /* BARRA DE BÚSQUEDA - FIXED */
+        /* Fondo con imagen SOLO para el área de contenido principal */
+        .right_col {
+            background: linear-gradient(rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.98)), 
+                        url('img/fondo.png') center/cover no-repeat;
+            border-radius: 10px;
+            margin: 15px;
+            padding: 25px;
+            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.1);
+            min-height: calc(100vh - 100px);
+        }
+        
+        /* Panel interno transparente para mostrar el fondo */
+        .x_panel {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+        
+        /* BARRA DE BÚSQUEDA CON FONDO BLANCO */
         .search-container {
             background: white;
             padding: 20px;
             border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
             margin-bottom: 25px;
             border: 1px solid #e8f5e9;
             position: relative;
@@ -581,7 +621,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
             font-size: 14px;
         }
 
-        /* BOTÓN SUBIR - FIXED */
+        /* BOTÓN SUBIR */
         .btn-upload {
             background: linear-gradient(135deg, #009A3F, #00c853);
             color: white;
@@ -608,46 +648,48 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
             text-decoration: none;
         }
 
-        /* GRID DE MULTIMEDIA - FIXED TAMAÑO */
+        /* GRID DE MULTIMEDIA - TRANSPARENTE PARA VER EL FONDO */
         .media-container {
             padding: 0;
+            background: transparent;
         }
 
         .media-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 15px;
             margin: 0;
         }
 
+        /* TARJETAS MÁS PEQUEÑAS CON FONDO BLANCO */
         .media-card {
             background: white;
-            border-radius: 10px;
+            border-radius: 8px;
             overflow: hidden;
             box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             cursor: pointer;
             border: 1px solid #e8f5e9;
-            height: 320px;
+            height: 280px;
             display: flex;
             flex-direction: column;
         }
 
         .media-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 20px rgba(0, 154, 63, 0.15);
+            transform: translateY(-3px);
+            box-shadow: 0 8px 15px rgba(0, 154, 63, 0.15);
             border-color: #009A3F;
         }
 
         .media-type {
             position: absolute;
-            top: 10px;
-            left: 10px;
+            top: 8px;
+            left: 8px;
             background: rgba(0, 154, 63, 0.9);
             color: white;
-            padding: 2px 8px;
+            padding: 2px 6px;
             border-radius: 3px;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 600;
             z-index: 2;
             display: flex;
@@ -658,7 +700,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
         .media-thumbnail {
             position: relative;
             width: 100%;
-            height: 160px;
+            height: 140px;
             overflow: hidden;
             background: #f5f5f5;
             flex-shrink: 0;
@@ -694,15 +736,15 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
         }
 
         .media-play-btn {
-            width: 45px;
-            height: 45px;
+            width: 40px;
+            height: 40px;
             background: rgba(255, 255, 255, 0.95);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             color: #009A3F;
-            font-size: 16px;
+            font-size: 14px;
             box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
             transform: scale(0.9);
             transition: transform 0.3s ease;
@@ -713,7 +755,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
         }
 
         .media-info {
-            padding: 15px;
+            padding: 12px;
             flex-grow: 1;
             display: flex;
             flex-direction: column;
@@ -722,49 +764,49 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
 
         .media-title {
             font-weight: 600;
-            font-size: 14px;
+            font-size: 13px;
             color: #333;
-            margin-bottom: 6px;
+            margin-bottom: 5px;
             line-height: 1.4;
             display: -webkit-box;
             -webkit-line-clamp: 2;
             -webkit-box-orient: vertical;
             overflow: hidden;
-            height: 40px;
+            height: 36px;
         }
 
         .media-description {
             color: #666;
-            font-size: 12px;
-            margin-bottom: 10px;
+            font-size: 11px;
+            margin-bottom: 8px;
             line-height: 1.4;
             display: -webkit-box;
             -webkit-line-clamp: 2;
             -webkit-box-orient: vertical;
             overflow: hidden;
             flex-grow: 1;
-            height: 34px;
+            height: 30px;
         }
 
         .media-meta {
             display: flex;
             justify-content: space-between;
             color: #888;
-            font-size: 11px;
+            font-size: 10px;
             margin-top: auto;
-            padding-top: 10px;
+            padding-top: 8px;
             border-top: 1px solid #f0f0f0;
         }
 
         .media-stats {
             display: flex;
             align-items: center;
-            gap: 5px;
+            gap: 4px;
         }
 
         .media-date {
             color: #999;
-            font-size: 10px;
+            font-size: 9px;
             text-align: right;
         }
 
@@ -772,43 +814,43 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
         .video-badge {
             background: #FF5722;
             color: white;
-            padding: 3px 8px;
+            padding: 2px 6px;
             border-radius: 3px;
-            font-size: 11px;
+            font-size: 9px;
             font-weight: bold;
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            gap: 3px;
         }
 
         .audio-badge {
             background: #2196F3;
             color: white;
-            padding: 3px 8px;
+            padding: 2px 6px;
             border-radius: 3px;
-            font-size: 11px;
+            font-size: 9px;
             font-weight: bold;
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            gap: 3px;
         }
 
         .spotify-badge {
             background: #1DB954;
             color: white;
-            padding: 3px 8px;
+            padding: 2px 6px;
             border-radius: 3px;
-            font-size: 11px;
+            font-size: 9px;
             font-weight: bold;
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            gap: 3px;
         }
 
         /* ESTADOS */
         .no-media {
             text-align: center;
-            padding: 50px 20px;
+            padding: 40px 20px;
             color: #666;
             background: white;
             border-radius: 10px;
@@ -818,19 +860,19 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
         }
 
         .no-media i {
-            font-size: 40px;
-            margin-bottom: 15px;
+            font-size: 36px;
+            margin-bottom: 12px;
             color: #ddd;
         }
 
         .no-media h3 {
-            font-size: 16px;
-            margin-bottom: 10px;
+            font-size: 15px;
+            margin-bottom: 8px;
         }
 
         .no-media p {
-            font-size: 13px;
-            margin-bottom: 20px;
+            font-size: 12px;
+            margin-bottom: 15px;
         }
 
         /* MODALES */
@@ -854,7 +896,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
         .upload-area {
             border: 2px dashed #009A3F;
             border-radius: 10px;
-            padding: 30px 15px;
+            padding: 25px 15px;
             text-align: center;
             background: rgba(0, 154, 63, 0.05);
             margin: 15px 0;
@@ -869,9 +911,9 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
         }
 
         .upload-area i {
-            font-size: 36px;
+            font-size: 32px;
             color: #009A3F;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
 
         .tab-content {
@@ -912,11 +954,11 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
 
         /* FOOTER específico */
         .footer-dashboard {
-            margin-top: 20px;
-            padding: 12px 15px;
+            margin-top: 15px;
+            padding: 10px 15px;
             background: rgba(0, 154, 63, 0.05);
             border-radius: 8px;
-            font-size: 11px;
+            font-size: 10px;
             border-top: 1px solid #e0e0e0;
         }
 
@@ -933,16 +975,21 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
             }
             
             .media-grid {
-                grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-                gap: 15px;
+                grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+                gap: 12px;
             }
             
             .media-card {
-                height: 300px;
+                height: 260px;
             }
             
             .media-thumbnail {
-                height: 140px;
+                height: 120px;
+            }
+            
+            .right_col {
+                margin: 10px;
+                padding: 20px;
             }
         }
 
@@ -953,6 +1000,11 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
             
             .media-card {
                 max-width: 100%;
+                height: 250px;
+            }
+            
+            .media-thumbnail {
+                height: 110px;
             }
         }
     </style>
@@ -1046,7 +1098,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
                 
                 <div class="row">
                     <div class="col-md-12 col-sm-12">
-                        <div class="x_panel">
+                        <div class="x_panel" style="background: transparent; border: none; box-shadow: none;">
                             <div class="x_content">
                                 <!-- Barra de búsqueda y subida -->
                                 <div class="search-container">
