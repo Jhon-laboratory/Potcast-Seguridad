@@ -172,7 +172,7 @@ function getSFTPFiles() {
                 'modified' => $stat['mtime'],
                 'url' => "stream.php?file=" . urlencode($file),
                 'thumbnail' => getThumbnailForFile($file_type, $extension, $title),
-                'description' => $stats['descripcion'] ?? 'Archivo multimedia del servidor',
+                'description' => $stats['descripcion'] ?? '',
                 'views' => $stats['views'] ?? 0,
                 'likes' => $stats['likes'] ?? 0,
                 'date' => $stats['fecha'] ?? date('d/m/Y H:i', $stat['mtime']),
@@ -424,8 +424,8 @@ function getThumbnailForFile($type, $extension, $title = '') {
     // Imágenes específicas para diferentes tipos - TEMAS INDUSTRIALES/CAPACITACIÓN
     $thumbnails = [
         'video' => [
-            'default' => 'https://images.unsplash.com/photo-1497366754035-f200968a6e72?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
-            'mp4' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'default' => 'https://img.freepik.com/fotos-premium/conceito-de-sistema-de-gestao-de-inventario-de-armazem-inteligente_46383-19082.jpg',
+            'mp4' => 'https://img.freepik.com/fotos-premium/conceito-de-sistema-de-gestao-de-inventario-de-armazem-inteligente_46383-19082.jpg',
             'avi' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
             'mov' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
             'mkv' => 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
@@ -522,7 +522,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Portal Multimedia - RANSA</title>
+    <title>Portal de Podcast - RANSA</title>
 
     <!-- CSS del template -->
     <link href="vendors/bootstrap/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -1019,7 +1019,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
                     <div class="navbar nav_title" style="border: 0;">
                         <a href="main.php" class="site_title">
                             <img src="img/logo.png" alt="RANSA Logo" style="height: 32px;">
-                            <span style="font-size: 12px; margin-left: 4px;">Multimedia</span>
+                            
                         </a>
                     </div>
                     <div class="clearfix"></div>
@@ -1041,20 +1041,12 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
                             <h3>Navegación</h3>
                             <ul class="nav side-menu">
                                 <li class="active">
-                                    <a href="main.php"><i class="fa fa-video-camera"></i> Multimedia</a>
+                                    <a href="main.php"><i class="fa fa-video-camera"></i> Videos-Potcast</a>
                                 </li>
                                 <li>
-                                    <a href="ransa_main.php"><i class="fa fa-dashboard"></i> Dashboard</a>
+                                    <a href="dashboard.php"><i class="fa fa-dashboard"></i> Dashboard</a>
                                 </li>
-                                <li>
-                                    <a href="ingreso.php"><i class="fa fa-sign-in"></i> Ingreso</a>
-                                </li>
-                                <li>
-                                    <a href="translado.php"><i class="fa fa-exchange"></i> Traslado</a>
-                                </li>
-                                <li>
-                                    <a href="reportes.php"><i class="fa fa-file-text"></i> Reportes</a>
-                                </li>
+
                             </ul>
                         </div>
                     </div>
@@ -1112,11 +1104,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
                                             <i class="fa fa-plus"></i> Agregar Contenido
                                         </button>
                                     </div>
-                                    <div class="mt-3 text-muted" style="font-size: 12px;">
-                                        <i class="fa fa-server"></i>
-                                        <span>SFTP: <?php echo $sftp_host; ?> | SQL Server: <?php echo $host; ?> | </span>
-                                        <span><?php echo $total_files; ?> archivo(s)</span>
-                                    </div>
+                                    
                                 </div>
 
                                 <!-- Grid de contenido multimedia -->
@@ -1140,7 +1128,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
                                                              alt="<?php echo htmlspecialchars($media['title']); ?>">
                                                         <span class="media-type">
                                                             <?php if ($media['source'] === 'spotify'): ?>
-                                                                <i class="fa fa-spotify"></i> SPOTIFY
+                                                                <i class="fa fa-spotify"></i> POTCAST
                                                             <?php elseif ($media['type'] === 'video'): ?>
                                                                 <i class="fa fa-video-camera"></i> VIDEO
                                                             <?php else: ?>
@@ -1164,7 +1152,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
                                                             <div class="media-stats">
                                                                 <?php if ($media['source'] === 'spotify'): ?>
                                                                     <span class="spotify-badge">
-                                                                        <i class="fa fa-spotify"></i> SPOTIFY
+                                                                        <i class="fa fa-spotify"></i> POTCAST
                                                                     </span>
                                                                 <?php elseif ($media['type'] === 'video'): ?>
                                                                     <span class="video-badge">
@@ -1853,15 +1841,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
                     ${media.embed_code}
                 </div>
                 
-                <div class="card">
-                    <div class="card-body">
-                        <h6 class="card-subtitle mb-2 text-muted">Información</h6>
-                        <p class="card-text">${media.description}</p>
-                        <div class="mt-2">
-                            <small class="text-muted"><i class="fa fa-database"></i> Almacenado en SQL Server</small>
-                        </div>
-                    </div>
-                </div>
+                
             </div>
         `);
         
@@ -2098,7 +2078,7 @@ $usuario = $_SESSION['usuario'] ?? 'Usuario';
     document.addEventListener('keydown', function(event) {
         if (event.key === 'F1') {
             event.preventDefault();
-            window.location.href = 'ransa_main.php';
+            window.location.href = 'dashboard.php';
         }
         if (event.key === 'F2' && event.ctrlKey) {
             event.preventDefault();
