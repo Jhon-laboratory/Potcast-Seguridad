@@ -3,11 +3,11 @@ session_start();
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
-// Verificar si el usuario está logueado
+/*
 if (!isset($_SESSION['usuario']) || !isset($_SESSION['usuario_id'])) {
     header("Location: login.php");
     exit;
-}
+}*/
 
 // ===== CONFIGURACIÓN SQL SERVER =====
 $host = 'Jorgeserver.database.windows.net';
