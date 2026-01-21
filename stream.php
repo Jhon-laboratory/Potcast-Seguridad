@@ -90,18 +90,16 @@ try {
     header('Accept-Ranges: bytes');
     header('Cache-Control: public, max-age=3600');
     
-    // Manejar range requests para streaming
+    // Manejar range requests
     $range = '';
     if (isset($_SERVER['HTTP_RANGE'])) {
         $range = $_SERVER['HTTP_RANGE'];
     }
     
     if ($range == '') {
-        // Enviar archivo completo
         header('HTTP/1.1 200 OK');
         
-        // Leer en chunks para no sobrecargar memoria
-        $chunk_size = 8192; // 8KB chunks
+        $chunk_size = 8192;
         $offset = 0;
         
         while ($offset < $file_size) {
@@ -113,7 +111,6 @@ try {
             $offset += strlen($chunk);
         }
     } else {
-        // Manejar partial content
         list($size_unit, $range_orig) = explode('=', $range, 2);
         
         if ($size_unit != 'bytes') {
@@ -138,7 +135,6 @@ try {
         header("Content-Range: bytes $range_start-$range_end/$file_size");
         header('Content-Length: ' . $length);
         
-        // Enviar solo el rango solicitado
         $chunk_size = 8192;
         $offset = $range_start;
         $remaining = $length;

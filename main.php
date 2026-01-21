@@ -9,10 +9,12 @@ if (!isset($_SESSION['usuario']) || !isset($_SESSION['usuario_id'])) {
     exit;
 }
 
-// Incluir phpseclib para SFTP usando autoload de composer
-require_once __DIR__ . '/vendor/autoload.php';
-
-use phpseclib3\Net\SFTP;
+// ===== CONFIGURACIÓN SQL SERVER =====
+$host = 'Jorgeserver.database.windows.net';
+$dbname = 'DPL';
+$username = 'Jmmc';
+$password = 'ChaosSoldier01';
+// ===================================
 
 // ===== CONFIGURACIÓN SFTP =====
 $sftp_host = '192.168.1.5';
@@ -22,12 +24,42 @@ $sftp_pass = 'Mortadela1';
 $remote_dir = '/videos/';
 // ==============================
 
+// Conectar a SQL Server
+function connectSQLServer() {
+    global $host, $dbname, $username, $password;
+    
+    try {
+        $connectionInfo = array(
+            "Database" => $dbname,
+            "UID" => $username,
+            "PWD" => $password,
+            "CharacterSet" => "UTF-8"
+        );
+        
+        $conn = sqlsrv_connect($host, $connectionInfo);
+        
+        if ($conn === false) {
+            $errors = sqlsrv_errors();
+            return ['success' => false, 'error' => 'Error SQL Server: ' . $errors[0]['message']];
+        }
+        
+        return ['success' => true, 'conn' => $conn];
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => 'Excepción SQL Server: ' . $e->getMessage()];
+    }
+}
+
 // Conectar al SFTP
 function connectSFTP() {
     global $sftp_host, $sftp_port, $sftp_user, $sftp_pass;
     
     try {
-        $sftp = new SFTP($sftp_host, $sftp_port);
+        // Incluir phpseclib si no está incluido
+        if (!class_exists('phpseclib3\Net\SFTP')) {
+            require_once __DIR__ . '/vendor/autoload.php';
+        }
+        
+        $sftp = new phpseclib3\Net\SFTP($sftp_host, $sftp_port);
         if (!$sftp->login($sftp_user, $sftp_pass)) {
             return ['success' => false, 'error' => 'Error de autenticación SFTP'];
         }
@@ -37,7 +69,42 @@ function connectSFTP() {
     }
 }
 
-// Obtener archivos multimedia del SFTP
+// Obtener todos los archivos (videos/audios SFTP + embeds Spotify)
+function getAllMediaFiles() {
+    $media_files = [];
+    
+    // 1. Obtener archivos del SFTP
+    $sftp_files = getSFTPFiles();
+    if ($sftp_files['success']) {
+        foreach ($sftp_files['files'] as $file) {
+            $file['source'] = 'sftp';
+            $file['media_type'] = 'file';
+            $media_files[] = $file;
+        }
+    }
+    
+    // 2. Obtener embeds de Spotify de la base de datos
+    $spotify_embeds = getSpotifyEmbeds();
+    if ($spotify_embeds['success']) {
+        foreach ($spotify_embeds['embeds'] as $embed) {
+            $embed['source'] = 'spotify';
+            $embed['media_type'] = 'embed';
+            $embed['type'] = 'audio';
+            $media_files[] = $embed;
+        }
+    }
+    
+    // Ordenar por fecha (más reciente primero)
+    usort($media_files, function($a, $b) {
+        $dateA = isset($a['modified']) ? $a['modified'] : strtotime($a['FechaCreacion']);
+        $dateB = isset($b['modified']) ? $b['modified'] : strtotime($b['FechaCreacion']);
+        return $dateB <=> $dateA;
+    });
+    
+    return $media_files;
+}
+
+// Obtener archivos del SFTP
 function getSFTPFiles() {
     global $remote_dir;
     
@@ -69,7 +136,7 @@ function getSFTPFiles() {
             $full_path = $remote_dir . $file;
             $stat = $sftp->stat($full_path);
             
-            if (!$stat || !isset($stat['type']) || $stat['type'] != 1) { // 1 = archivo regular
+            if (!$stat || !isset($stat['type']) || $stat['type'] != 1) {
                 continue;
             }
             
@@ -85,74 +152,345 @@ function getSFTPFiles() {
             } elseif (in_array($extension, $audio_extensions)) {
                 $file_type = 'audio';
             } else {
-                continue; // Saltar archivos no multimedia
+                continue;
             }
             
-            // Obtener URL pública
-            $public_url = "stream.php?file=" . urlencode($file);
+            // Obtener estadísticas de la base de datos usando el nombre del archivo
+            $stats = getMediaStatsByName($file, 'sftp');
             
             $media_files[] = [
-                'id' => md5($file),
+                'id' => $stats['id'] ?? md5($file),
+                'db_id' => $stats['id'] ?? null,
                 'filename' => $file,
-                'title' => ucfirst(str_replace(['_', '-'], ' ', pathinfo($file, PATHINFO_FILENAME))),
+                'title' => $stats['name'] ?? ucfirst(str_replace(['_', '-'], ' ', pathinfo($file, PATHINFO_FILENAME))),
                 'type' => $file_type,
                 'extension' => strtoupper($extension),
                 'size' => $stat['size'],
                 'modified' => $stat['mtime'],
-                'url' => $public_url,
-                'thumbnail' => getThumbnailForFile($file_type, $extension),
-                'description' => 'Archivo multimedia del servidor',
-                'views' => 0,
-                'likes' => 0,
-                'date' => date('d/m/Y H:i', $stat['mtime'])
+                'url' => "stream.php?file=" . urlencode($file),
+                'thumbnail' => getThumbnailForFile($file_type, $extension, $stats['name'] ?? ''),
+                'description' => $stats['descripcion'] ?? 'Archivo multimedia del servidor',
+                'views' => $stats['views'] ?? 0,
+                'likes' => $stats['likes'] ?? 0,
+                'date' => date('d/m/Y H:i', $stat['mtime']),
+                'original_name' => $file
             ];
         }
-        
-        // Ordenar por fecha de modificación (más reciente primero)
-        usort($media_files, function($a, $b) {
-            return $b['modified'] <=> $a['modified'];
-        });
         
         return ['success' => true, 'files' => $media_files];
         
     } catch (Exception $e) {
-        return ['success' => false, 'error' => 'Error al leer archivos: ' . $e->getMessage()];
+        return ['success' => false, 'error' => 'Error al leer archivos SFTP: ' . $e->getMessage()];
+    }
+}
+
+// Obtener embeds de Spotify de la base de datos
+function getSpotifyEmbeds() {
+    $connection = connectSQLServer();
+    if (!$connection['success']) {
+        return ['success' => false, 'error' => $connection['error']];
+    }
+    
+    $conn = $connection['conn'];
+    
+    try {
+        $sql = "SELECT 
+                    v.id,
+                    v.name AS title,
+                    v.descripcion,
+                    v.embeded AS embed_code,
+                    v.Vistas AS views,
+                    v.Likes AS likes,
+                    v.Ultimavista AS FechaCreacion
+                FROM [DPL].[externos].[Vistas] v
+                WHERE v.embeded LIKE '%spotify.com/embed%'
+                ORDER BY v.Ultimavista DESC";
+        
+        $stmt = sqlsrv_query($conn, $sql);
+        
+        if ($stmt === false) {
+            return ['success' => false, 'error' => 'Error al ejecutar consulta'];
+        }
+        
+        $embeds = [];
+        
+        while ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
+            // Extraer ID de Spotify del embed code
+            $spotify_id = extractSpotifyId($row['embed_code']);
+            
+            $embeds[] = [
+                'id' => 'spotify_' . $row['id'],
+                'db_id' => $row['id'],
+                'title' => $row['title'],
+                'embed_code' => $row['embed_code'],
+                'spotify_id' => $spotify_id,
+                'FechaCreacion' => $row['FechaCreacion'] ? $row['FechaCreacion']->format('Y-m-d H:i:s') : date('Y-m-d H:i:s'),
+                'views' => $row['views'],
+                'likes' => $row['likes'],
+                'date' => $row['FechaCreacion'] ? date('d/m/Y H:i', strtotime($row['FechaCreacion']->format('Y-m-d H:i:s'))) : date('d/m/Y H:i'),
+                'description' => $row['descripcion'] ?? 'Embed de Spotify',
+                'type' => 'audio',
+                'extension' => 'SPOTIFY',
+                'url' => 'javascript:void(0)',
+                'thumbnail' => 'https://images.unsplash.com/photo-1611339555312-e607c8352fd7?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80'
+            ];
+        }
+        
+        sqlsrv_free_stmt($stmt);
+        sqlsrv_close($conn);
+        
+        return ['success' => true, 'embeds' => $embeds];
+        
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => 'Error al obtener embeds: ' . $e->getMessage()];
+    }
+}
+
+// Obtener estadísticas de medios por nombre (para archivos SFTP)
+function getMediaStatsByName($filename, $source) {
+    $connection = connectSQLServer();
+    if (!$connection['success']) {
+        return ['id' => null, 'views' => 0, 'likes' => 0];
+    }
+    
+    $conn = $connection['conn'];
+    
+    try {
+        // Buscar por nombre (sin prefijo [SFTP])
+        $search_name = '%' . $filename . '%';
+        $sql = "SELECT id, name, descripcion, Vistas AS views, Likes AS likes 
+                FROM [DPL].[externos].[Vistas] 
+                WHERE (embeded LIKE 'sftp://%' OR embeded IS NULL) 
+                AND name LIKE ?";
+        
+        $params = array($search_name);
+        $stmt = sqlsrv_query($conn, $sql, $params);
+        
+        if ($stmt === false) {
+            return ['id' => null, 'views' => 0, 'likes' => 0];
+        }
+        
+        if ($row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC)) {
+            $stats = [
+                'id' => $row['id'],
+                'name' => $row['name'],
+                'descripcion' => $row['descripcion'],
+                'views' => $row['views'],
+                'likes' => $row['likes']
+            ];
+        } else {
+            $stats = ['id' => null, 'views' => 0, 'likes' => 0];
+        }
+        
+        sqlsrv_free_stmt($stmt);
+        sqlsrv_close($conn);
+        
+        return $stats;
+        
+    } catch (Exception $e) {
+        return ['id' => null, 'views' => 0, 'likes' => 0];
+    }
+}
+
+// Extraer ID de Spotify del embed code
+function extractSpotifyId($embedCode) {
+    $pattern = '/spotify\.com\/embed\/(?:episode|track|album|playlist|show)\/([a-zA-Z0-9]+)/';
+    preg_match($pattern, $embedCode, $matches);
+    return isset($matches[1]) ? $matches[1] : '';
+}
+
+// Incrementar vistas usando db_id
+function incrementViews($db_id) {
+    $connection = connectSQLServer();
+    if (!$connection['success']) {
+        return false;
+    }
+    
+    $conn = $connection['conn'];
+    
+    try {
+        // Actualizar vistas y fecha
+        $sql = "UPDATE [DPL].[externos].[Vistas] 
+                SET Vistas = Vistas + 1,
+                    Ultimavista = GETDATE()
+                WHERE id = ?";
+        
+        $params = array($db_id);
+        $stmt = sqlsrv_query($conn, $sql, $params);
+        
+        if ($stmt === false) {
+            return false;
+        }
+        
+        sqlsrv_free_stmt($stmt);
+        sqlsrv_close($conn);
+        
+        return true;
+        
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+// Incrementar likes usando db_id
+function incrementLikes($db_id) {
+    $connection = connectSQLServer();
+    if (!$connection['success']) {
+        return false;
+    }
+    
+    $conn = $connection['conn'];
+    
+    try {
+        // Actualizar likes
+        $sql = "UPDATE [DPL].[externos].[Vistas] 
+                SET Likes = Likes + 1,
+                    Ultimavista = GETDATE()
+                WHERE id = ?";
+        
+        $params = array($db_id);
+        $stmt = sqlsrv_query($conn, $sql, $params);
+        
+        if ($stmt === false) {
+            return false;
+        }
+        
+        sqlsrv_free_stmt($stmt);
+        sqlsrv_close($conn);
+        
+        return true;
+        
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+// Guardar embed de Spotify directamente en tabla Vistas
+function saveSpotifyEmbed($title, $embedCode, $description = '') {
+    $connection = connectSQLServer();
+    if (!$connection['success']) {
+        return ['success' => false, 'error' => $connection['error']];
+    }
+    
+    $conn = $connection['conn'];
+    
+    try {
+        // Insertar directamente en Vistas
+        $sql = "INSERT INTO [DPL].[externos].[Vistas] (name, descripcion, embeded, Vistas, Likes, Ultimavista) 
+                VALUES (?, ?, ?, 0, 0, GETDATE())";
+        
+        $params = array($title, $description, $embedCode);
+        $stmt = sqlsrv_prepare($conn, $sql, $params);
+        
+        if ($stmt === false || !sqlsrv_execute($stmt)) {
+            $errors = sqlsrv_errors();
+            return ['success' => false, 'error' => 'Error al insertar embed: ' . $errors[0]['message']];
+        }
+        
+        // Obtener el ID insertado
+        $sql = "SELECT SCOPE_IDENTITY() AS new_id";
+        $stmt = sqlsrv_query($conn, $sql);
+        
+        if ($stmt === false) {
+            return ['success' => false, 'error' => 'Error al obtener ID'];
+        }
+        
+        $row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC);
+        $new_id = $row['new_id'];
+        
+        sqlsrv_free_stmt($stmt);
+        sqlsrv_close($conn);
+        
+        return ['success' => true, 'id' => $new_id];
+        
+    } catch (Exception $e) {
+        return ['success' => false, 'error' => 'Excepción: ' . $e->getMessage()];
     }
 }
 
 // Obtener thumbnail según tipo de archivo
-function getThumbnailForFile($type, $extension) {
+function getThumbnailForFile($type, $extension, $title = '') {
+    // Imágenes específicas para diferentes tipos
+    $thumbnails = [
+        'video' => [
+            'default' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mp4' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'avi' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mov' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mkv' => 'https://images.unsplash.com/photo-1536240478700-b869070f9279?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80'
+        ],
+        'audio' => [
+            'default' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'mp3' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'wav' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'ogg' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'm4a' => 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80',
+            'spotify' => 'https://images.unsplash.com/photo-1611339555312-e607c8352fd7?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80'
+        ]
+    ];
+    
     if ($type === 'video') {
-        if (file_exists('img/video-thumb.jpg')) {
-            return 'img/video-thumb.jpg';
-        }
-        return 'img/default-video.jpg';
+        return $thumbnails['video'][$extension] ?? $thumbnails['video']['default'];
     } elseif ($type === 'audio') {
-        if (file_exists('img/audio-thumb.jpg')) {
-            return 'img/audio-thumb.jpg';
+        if ($extension === 'spotify') {
+            return $thumbnails['audio']['spotify'];
         }
-        return 'img/default-audio.jpg';
+        return $thumbnails['audio'][$extension] ?? $thumbnails['audio']['default'];
     }
     
-    if (file_exists('img/default-thumb.jpg')) {
-        return 'img/default-thumb.jpg';
-    }
-    return 'img/default-media.jpg';
+    return $thumbnails['audio']['default'];
 }
 
-// Obtener archivos del SFTP
-$media_result = getSFTPFiles();
-if ($media_result['success']) {
-    $media_files = $media_result['files'];
-    $sftp_message = isset($media_result['message']) ? $media_result['message'] : '';
-} else {
-    $media_files = [];
-    $sftp_error = $media_result['error'];
+// ===== MANEJO DE PETICIONES AJAX =====
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    header('Content-Type: application/json');
+    
+    if ($_POST['action'] === 'increment_views') {
+        $db_id = $_POST['db_id'] ?? '';
+        
+        if (empty($db_id)) {
+            echo json_encode(['success' => false, 'error' => 'ID no válido']);
+            exit;
+        }
+        
+        $result = incrementViews($db_id);
+        echo json_encode(['success' => $result]);
+        exit;
+        
+    } elseif ($_POST['action'] === 'increment_likes') {
+        $db_id = $_POST['db_id'] ?? '';
+        
+        if (empty($db_id)) {
+            echo json_encode(['success' => false, 'error' => 'ID no válido']);
+            exit;
+        }
+        
+        $result = incrementLikes($db_id);
+        echo json_encode(['success' => $result]);
+        exit;
+        
+    } elseif ($_POST['action'] === 'save_spotify_embed') {
+        $title = $_POST['title'] ?? '';
+        $embedCode = $_POST['embedCode'] ?? '';
+        $description = $_POST['description'] ?? '';
+        
+        if (empty($title) || empty($embedCode)) {
+            echo json_encode(['success' => false, 'error' => 'Datos incompletos']);
+            exit;
+        }
+        
+        $result = saveSpotifyEmbed($title, $embedCode, $description);
+        echo json_encode($result);
+        exit;
+    }
 }
+
+// Obtener todos los archivos multimedia
+$all_media = getAllMediaFiles();
+$total_files = count($all_media);
 
 $sede_usuario = isset($_SESSION['tienda']) ? $_SESSION['tienda'] : '';
 $usuario = $_SESSION['usuario'] ?? 'Usuario';
-$total_files = count($media_files);
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -290,7 +628,7 @@ $total_files = count($media_files);
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             cursor: pointer;
             border: 1px solid #e8f5e9;
-            height: 320px; /* ALTURA FIJA */
+            height: 320px;
             display: flex;
             flex-direction: column;
         }
@@ -320,7 +658,7 @@ $total_files = count($media_files);
         .media-thumbnail {
             position: relative;
             width: 100%;
-            height: 160px; /* ALTURA FIJA PARA THUMBNAIL */
+            height: 160px;
             overflow: hidden;
             background: #f5f5f5;
             flex-shrink: 0;
@@ -455,6 +793,18 @@ $total_files = count($media_files);
             gap: 4px;
         }
 
+        .spotify-badge {
+            background: #1DB954;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
         /* ESTADOS */
         .no-media {
             text-align: center;
@@ -483,25 +833,6 @@ $total_files = count($media_files);
             margin-bottom: 20px;
         }
 
-        .loading {
-            text-align: center;
-            padding: 50px 20px;
-            color: #009A3F;
-            grid-column: 1 / -1;
-        }
-
-        .loading i {
-            font-size: 36px;
-            margin-bottom: 15px;
-            animation: pulse 1.5s ease-in-out infinite;
-        }
-
-        @keyframes pulse {
-            0% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.1); opacity: 0.7; }
-            100% { transform: scale(1); opacity: 1; }
-        }
-
         /* MODALES */
         .modal-header {
             background: linear-gradient(135deg, #009A3F, #00c853);
@@ -518,13 +849,6 @@ $total_files = count($media_files);
             display: flex;
             align-items: center;
             gap: 8px;
-        }
-
-        .modal-header .close {
-            color: white;
-            opacity: 0.8;
-            text-shadow: none;
-            font-size: 20px;
         }
 
         .upload-area {
@@ -550,16 +874,6 @@ $total_files = count($media_files);
             margin-bottom: 10px;
         }
 
-        .upload-area h4 {
-            font-size: 16px;
-            margin-bottom: 5px;
-        }
-
-        .upload-area p {
-            font-size: 13px;
-            color: #666;
-        }
-
         .tab-content {
             padding: 15px 0;
         }
@@ -576,6 +890,13 @@ $total_files = count($media_files);
             border-bottom: 3px solid #009A3F;
             color: #009A3F;
             background: transparent;
+        }
+
+        .embed-code-input {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            height: 120px;
+            resize: vertical;
         }
 
         .upload-tabs {
@@ -733,48 +1054,42 @@ $total_files = count($media_files);
                                         <div class="search-input">
                                             <i class="fa fa-search"></i>
                                             <input type="text" id="searchInput" class="form-control" 
-                                                   placeholder="Buscar videos o audios...">
+                                                   placeholder="Buscar videos, audios o Spotify...">
                                         </div>
                                         <button class="btn-upload" data-toggle="modal" data-target="#uploadModal">
-                                            <i class="fa fa-upload"></i> Subir Archivo
+                                            <i class="fa fa-plus"></i> Agregar Contenido
                                         </button>
                                     </div>
                                     <div class="mt-3 text-muted" style="font-size: 12px;">
                                         <i class="fa fa-server"></i>
-                                        <span>SFTP: <?php echo $sftp_host; ?> | </span>
+                                        <span>SFTP: <?php echo $sftp_host; ?> | SQL Server: <?php echo $host; ?> | </span>
                                         <span><?php echo $total_files; ?> archivo(s)</span>
-                                        <?php if (isset($sftp_error)): ?>
-                                            <span class="text-danger ml-2">
-                                                <i class="fa fa-exclamation-triangle"></i> Error: <?php echo $sftp_error; ?>
-                                            </span>
-                                        <?php elseif (isset($sftp_message)): ?>
-                                            <span class="text-info ml-2">
-                                                <i class="fa fa-info-circle"></i> <?php echo $sftp_message; ?>
-                                            </span>
-                                        <?php endif; ?>
                                     </div>
                                 </div>
 
                                 <!-- Grid de contenido multimedia -->
                                 <div class="media-container">
-                                    <?php if (empty($media_files)): ?>
+                                    <?php if (empty($all_media)): ?>
                                         <div class="no-media">
                                             <i class="fa fa-film"></i>
-                                            <h3>No hay archivos multimedia</h3>
-                                            <p><?php echo isset($sftp_error) ? $sftp_error : 'El servidor SFTP está vacío'; ?></p>
+                                            <h3>No hay contenido multimedia</h3>
+                                            <p>Sube archivos o agrega embeds de Spotify para comenzar</p>
                                             <button class="btn-upload mt-3" data-toggle="modal" data-target="#uploadModal">
-                                                <i class="fa fa-upload"></i> Subir Primer Archivo
+                                                <i class="fa fa-plus"></i> Agregar Contenido
                                             </button>
                                         </div>
                                     <?php else: ?>
                                         <div class="media-grid" id="mediaGrid">
-                                            <?php foreach ($media_files as $file): ?>
-                                                <div class="media-card" onclick="playMedia('<?php echo $file['id']; ?>')" data-type="<?php echo $file['type']; ?>">
+                                            <?php foreach ($all_media as $media): ?>
+                                                <div class="media-card" onclick="playMedia('<?php echo $media['id']; ?>', '<?php echo $media['source']; ?>', '<?php echo $media['db_id']; ?>')" 
+                                                     data-type="<?php echo $media['type']; ?>" data-source="<?php echo $media['source']; ?>">
                                                     <div class="media-thumbnail">
-                                                        <img src="<?php echo htmlspecialchars($file['thumbnail']); ?>" 
-                                                             alt="<?php echo htmlspecialchars($file['title']); ?>">
+                                                        <img src="<?php echo htmlspecialchars($media['thumbnail']); ?>" 
+                                                             alt="<?php echo htmlspecialchars($media['title']); ?>">
                                                         <span class="media-type">
-                                                            <?php if ($file['type'] === 'video'): ?>
+                                                            <?php if ($media['source'] === 'spotify'): ?>
+                                                                <i class="fa fa-spotify"></i> SPOTIFY
+                                                            <?php elseif ($media['type'] === 'video'): ?>
                                                                 <i class="fa fa-video-camera"></i> VIDEO
                                                             <?php else: ?>
                                                                 <i class="fa fa-music"></i> AUDIO
@@ -787,30 +1102,38 @@ $total_files = count($media_files);
                                                         </div>
                                                     </div>
                                                     <div class="media-info">
-                                                        <h5 class="media-title" title="<?php echo htmlspecialchars($file['title']); ?>">
-                                                            <?php echo htmlspecialchars($file['title']); ?>
+                                                        <h5 class="media-title" title="<?php echo htmlspecialchars($media['title']); ?>">
+                                                            <?php echo htmlspecialchars($media['title']); ?>
                                                         </h5>
-                                                        <div class="media-description" title="<?php echo htmlspecialchars($file['description']); ?>">
-                                                            <?php echo htmlspecialchars($file['description']); ?>
+                                                        <div class="media-description" title="<?php echo htmlspecialchars($media['description']); ?>">
+                                                            <?php echo htmlspecialchars($media['description']); ?>
                                                         </div>
                                                         <div class="media-meta">
                                                             <div class="media-stats">
-                                                                <?php if ($file['type'] === 'video'): ?>
+                                                                <?php if ($media['source'] === 'spotify'): ?>
+                                                                    <span class="spotify-badge">
+                                                                        <i class="fa fa-spotify"></i> SPOTIFY
+                                                                    </span>
+                                                                <?php elseif ($media['type'] === 'video'): ?>
                                                                     <span class="video-badge">
-                                                                        <i class="fa fa-file-video-o"></i> <?php echo $file['extension']; ?>
+                                                                        <i class="fa fa-file-video-o"></i> <?php echo $media['extension']; ?>
                                                                     </span>
                                                                 <?php else: ?>
                                                                     <span class="audio-badge">
-                                                                        <i class="fa fa-file-audio-o"></i> <?php echo $file['extension']; ?>
+                                                                        <i class="fa fa-file-audio-o"></i> <?php echo $media['extension']; ?>
                                                                     </span>
                                                                 <?php endif; ?>
                                                                 <span class="mx-2">•</span>
-                                                                <span title="Tamaño del archivo">
-                                                                    <i class="fa fa-hdd-o"></i> <?php echo formatFileSize($file['size']); ?>
+                                                                <span>
+                                                                    <i class="fa fa-eye"></i> <?php echo $media['views']; ?>
+                                                                </span>
+                                                                <span class="mx-2">•</span>
+                                                                <span>
+                                                                    <i class="fa fa-thumbs-up"></i> <?php echo $media['likes']; ?>
                                                                 </span>
                                                             </div>
                                                             <div class="media-date">
-                                                                <?php echo $file['date']; ?>
+                                                                <?php echo $media['date']; ?>
                                                             </div>
                                                         </div>
                                                     </div>
@@ -842,101 +1165,156 @@ $total_files = count($media_files);
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title">
-                        <i class="fa fa-upload"></i> Subir Archivo Multimedia
+                        <i class="fa fa-plus"></i> Agregar Contenido
                     </h5>
                     <button type="button" class="close" data-dismiss="modal">
                         <span>&times;</span>
                     </button>
                 </div>
                 <div class="modal-body">
-                    <!-- Formulario de subida -->
-                    <form id="uploadForm" enctype="multipart/form-data">
-                        <!-- Área de arrastrar y soltar -->
-                        <div class="upload-area" id="uploadArea">
-                            <i class="fa fa-cloud-upload-alt"></i>
-                            <h4>Arrastra tu archivo aquí</h4>
-                            <p>o haz clic para seleccionar archivo</p>
-                            <div class="mt-2">
-                                <span class="badge badge-success mr-1">VIDEO</span>
-                                <span class="badge badge-info mr-1">AUDIO</span>
-                            </div>
-                            <p class="text-muted mt-2" style="font-size: 11px;">
-                                Formatos: MP4, AVI, MOV, MKV, MP3, WAV, OGG<br>
-                                Tamaño máximo: 500MB
-                            </p>
-                            <input type="file" id="mediaFile" name="mediaFile" 
-                                   accept="video/*,audio/*" style="display: none;">
-                        </div>
-
-                        <!-- Previsualización -->
-                        <div id="mediaPreviewContainer" style="display: none; text-align: center; margin: 15px 0;">
-                            <div id="videoPreview" style="display: none;">
-                                <video controls style="max-width: 100%; max-height: 200px; border-radius: 6px;"></video>
-                            </div>
-                            <div id="audioPreview" style="display: none;">
-                                <audio controls style="width: 100%; max-width: 300px;"></audio>
-                            </div>
-                            <div id="fileInfo" class="mt-3">
-                                <p class="mb-1" id="fileName"></p>
-                                <p class="text-muted mb-0" style="font-size: 11px;" id="fileSize"></p>
-                            </div>
-                        </div>
-                    </form>
+                    <!-- Tabs para diferentes tipos de contenido -->
+                    <ul class="nav nav-tabs upload-tabs" id="uploadTabs" role="tablist">
+                        <li class="nav-item">
+                            <a class="nav-link active" id="file-tab" data-toggle="tab" href="#file" role="tab">
+                                <i class="fa fa-file-upload"></i> Subir Archivo
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" id="spotify-tab" data-toggle="tab" href="#spotify" role="tab">
+                                <i class="fa fa-spotify"></i> Spotify Embed
+                            </a>
+                        </li>
+                    </ul>
                     
-                    <!-- Campos adicionales -->
-                    <hr class="my-3">
+                    <div class="tab-content" id="uploadTabsContent">
+                        <!-- TAB 1: Subir archivo -->
+                        <div class="tab-pane fade show active" id="file" role="tabpanel">
+                            <form id="uploadForm" enctype="multipart/form-data">
+                                <!-- Área de arrastrar y soltar -->
+                                <div class="upload-area" id="uploadArea">
+                                    <i class="fa fa-cloud-upload-alt"></i>
+                                    <h4>Arrastra tu archivo aquí</h4>
+                                    <p>o haz clic para seleccionar archivo</p>
+                                    <div class="mt-2">
+                                        <span class="badge badge-success mr-1">VIDEO</span>
+                                        <span class="badge badge-info mr-1">AUDIO</span>
+                                    </div>
+                                    <p class="text-muted mt-2" style="font-size: 11px;">
+                                        Formatos: MP4, AVI, MOV, MKV, MP3, WAV, OGG<br>
+                                        Tamaño máximo: 500MB
+                                    </p>
+                                    <input type="file" id="mediaFile" name="mediaFile" 
+                                           accept="video/*,audio/*" style="display: none;">
+                                </div>
+
+                                <!-- Previsualización -->
+                                <div id="mediaPreviewContainer" style="display: none; text-align: center; margin: 15px 0;">
+                                    <div id="videoPreview" style="display: none;">
+                                        <video controls style="max-width: 100%; max-height: 200px; border-radius: 6px;"></video>
+                                    </div>
+                                    <div id="audioPreview" style="display: none;">
+                                        <audio controls style="width: 100%; max-width: 300px;"></audio>
+                                    </div>
+                                    <div id="fileInfo" class="mt-3">
+                                        <p class="mb-1" id="fileName"></p>
+                                        <p class="text-muted mb-0" style="font-size: 11px;" id="fileSize"></p>
+                                    </div>
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <!-- TAB 2: Spotify Embed -->
+                        <div class="tab-pane fade" id="spotify" role="tabpanel">
+                            <form id="spotifyForm">
+                                <div class="form-group mb-3">
+                                    <label class="form-label">Título del contenido *</label>
+                                    <input type="text" id="spotifyTitle" class="form-control" 
+                                           placeholder="Ej: Podcast Motivacional Semanal" required>
+                                </div>
+                                
+                                <div class="form-group mb-3">
+                                    <label class="form-label">Descripción</label>
+                                    <textarea id="spotifyDescription" class="form-control" rows="2"
+                                              placeholder="Breve descripción del contenido..."></textarea>
+                                </div>
+                                
+                                <div class="form-group mb-3">
+                                    <label class="form-label">Código Embed de Spotify *</label>
+                                    <textarea id="spotifyEmbedCode" class="form-control embed-code-input" 
+                                              placeholder='Pega aquí el código embed de Spotify. Ejemplo:
+<iframe style="border-radius:12px" src="https://open.spotify.com/embed/episode/1ABCDEFGHIJK?utm_source=generator" width="100%" height="352" frameBorder="0" allowfullscreen="" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>'
+                                              required rows="5"></textarea>
+                                    <small class="form-text text-muted">
+                                        Ve a Spotify, haz clic en "Compartir" → "Insertar" y copia el código iframe
+                                    </small>
+                                </div>
+                                
+                                <!-- Vista previa del embed -->
+                                <div class="form-group mb-3">
+                                    <label class="form-label">Vista Previa</label>
+                                    <div class="embed-preview" id="spotifyPreview">
+                                        <p class="text-muted mb-0">El contenido de Spotify aparecerá aquí</p>
+                                    </div>
+                                </div>
+                                
+                                <div class="text-center">
+                                    <button type="button" class="btn btn-info btn-sm" onclick="validateSpotifyEmbed()">
+                                        <i class="fa fa-check"></i> Validar y Previsualizar
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
                     
-                    <div class="form-group mb-3">
-                        <label class="form-label">Título *</label>
-                        <input type="text" id="contentTitle" class="form-control" 
-                               placeholder="Ej: Capacitación de seguridad 2024" required>
-                    </div>
+                    <!-- Campos comunes para archivos -->
+                    <div id="commonFields" class="d-none">
+                        <hr class="my-3">
+                        
+                        <div class="form-group mb-3">
+                            <label class="form-label">Título *</label>
+                            <input type="text" id="contentTitle" class="form-control" 
+                                   placeholder="Ej: Capacitación de seguridad 2024" required>
+                        </div>
 
-                    <div class="form-group mb-3">
-                        <label class="form-label">Descripción</label>
-                        <textarea id="contentDescription" class="form-control" rows="2"
-                                  placeholder="Breve descripción del contenido..."></textarea>
-                    </div>
+                        <div class="form-group mb-3">
+                            <label class="form-label">Descripción</label>
+                            <textarea id="contentDescription" class="form-control" rows="2"
+                                      placeholder="Breve descripción del contenido..."></textarea>
+                        </div>
 
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="form-group mb-3">
-                                <label class="form-label">Categoría</label>
-                                <select id="contentCategory" class="form-control">
-                                    <option value="capacitacion">Capacitación</option>
-                                    <option value="seguridad">Seguridad</option>
-                                    <option value="procedimientos">Procedimientos</option>
-                                    <option value="comunicados">Comunicados</option>
-                                    <option value="eventos">Eventos</option>
-                                    <option value="musica">Música</option>
-                                    <option value="general">General</option>
-                                </select>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group mb-3">
+                                    <label class="form-label">Categoría</label>
+                                    <select id="contentCategory" class="form-control">
+                                        <option value="capacitacion">Capacitación</option>
+                                        <option value="seguridad">Seguridad</option>
+                                        <option value="procedimientos">Procedimientos</option>
+                                        <option value="comunicados">Comunicados</option>
+                                        <option value="eventos">Eventos</option>
+                                        <option value="musica">Música</option>
+                                        <option value="general">General</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-group mb-3">
+                                    <label class="form-label">Tipo de contenido</label>
+                                    <select id="contentType" class="form-control">
+                                        <option value="video">Video</option>
+                                        <option value="audio">Audio</option>
+                                    </select>
+                                </div>
                             </div>
                         </div>
-                        <div class="col-md-6">
-                            <div class="form-group mb-3">
-                                <label class="form-label">Tipo de contenido</label>
-                                <select id="contentType" class="form-control">
-                                    <option value="video">Video</option>
-                                    <option value="audio">Audio</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="form-group mb-3">
-                        <label class="form-label">Etiquetas (opcional)</label>
-                        <input type="text" id="contentTags" class="form-control" 
-                               placeholder="seguridad, capacitacion, entrenamiento">
-                        <small class="form-text text-muted">Separadas por comas</small>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-dismiss="modal">
                         <i class="fa fa-times"></i> Cancelar
                     </button>
-                    <button type="button" class="btn btn-success" id="uploadBtn" disabled>
-                        <i class="fa fa-upload"></i> Subir al SFTP
+                    <button type="button" class="btn btn-success" id="saveBtn" disabled>
+                        <i class="fa fa-save"></i> Guardar
                     </button>
                 </div>
             </div>
@@ -978,8 +1356,12 @@ $total_files = count($media_files);
     // =============================================
     let player = null;
     let selectedFile = null;
-    let mediaFiles = <?php echo json_encode($media_files); ?>;
+    let currentEmbedData = null;
+    let currentTab = 'file';
+    let mediaFiles = <?php echo json_encode($all_media); ?>;
     let currentMediaId = null;
+    let currentMediaSource = null;
+    let currentDbId = null;
 
     // =============================================
     // FUNCIONES PRINCIPALES
@@ -990,9 +1372,19 @@ $total_files = count($media_files);
     });
 
     function setupEventListeners() {
-        // Cambiar tipo de contenido
-        $('#contentType').change(function() {
-            resetPreview();
+        // Cambio entre tabs
+        $('#uploadTabs a').on('shown.bs.tab', function(e) {
+            currentTab = $(e.target).attr("href").replace('#', '');
+            
+            if (currentTab === 'file') {
+                $('#commonFields').removeClass('d-none');
+                $('#saveBtn').html('<i class="fa fa-upload"></i> Subir Archivo');
+            } else {
+                $('#commonFields').addClass('d-none');
+                $('#saveBtn').html('<i class="fa fa-save"></i> Guardar Embed');
+            }
+            
+            resetSaveButton();
         });
 
         // Búsqueda en tiempo real
@@ -1009,8 +1401,14 @@ $total_files = count($media_files);
             }, 300);
         });
 
-        // Botón subir
-        $('#uploadBtn').click(uploadToSFTP);
+        // Botón guardar
+        $('#saveBtn').click(function() {
+            if (currentTab === 'file') {
+                uploadToSFTP();
+            } else {
+                saveSpotifyEmbed();
+            }
+        });
 
         // Cerrar modales
         $('#uploadModal').on('hidden.bs.modal', function() {
@@ -1127,11 +1525,61 @@ $total_files = count($media_files);
             $('#contentTitle').val(file.name.replace(/\.[^/.]+$/, ""));
         }
         
-        $('#uploadBtn').prop('disabled', false);
+        $('#saveBtn').prop('disabled', false);
         
         Swal.fire({
             title: 'Archivo seleccionado',
             text: `${file.name} (${formatFileSize(file.size)})`,
+            icon: 'success',
+            timer: 1500,
+            showConfirmButton: false
+        });
+    }
+
+    function validateSpotifyEmbed() {
+        const embedCode = $('#spotifyEmbedCode').val().trim();
+        
+        if (!embedCode) {
+            Swal.fire({
+                title: 'Código vacío',
+                text: 'Por favor ingresa un código embed de Spotify',
+                icon: 'warning',
+                confirmButtonText: 'OK'
+            });
+            return;
+        }
+        
+        // Validar que sea un embed de Spotify
+        if (!embedCode.includes('spotify.com/embed')) {
+            Swal.fire({
+                title: 'Código no válido',
+                text: 'El código debe ser un embed de Spotify válido',
+                icon: 'error',
+                confirmButtonText: 'OK'
+            });
+            return;
+        }
+        
+        currentEmbedData = embedCode;
+        
+        // Mostrar preview
+        $('#spotifyPreview').html(`
+            <div class="text-center">
+                <span class="spotify-badge" style="font-size: 14px;">
+                    <i class="fa fa-spotify"></i> SPOTIFY EMBED VÁLIDO
+                </span>
+                <div class="mt-2">
+                    <i class="fa fa-check-circle text-success"></i>
+                    <small class="text-success">Código Spotify detectado correctamente</small>
+                </div>
+            </div>
+        `);
+        
+        $('#saveBtn').prop('disabled', false);
+        
+        Swal.fire({
+            title: '¡Válido!',
+            text: 'Código Spotify detectado correctamente',
             icon: 'success',
             timer: 1500,
             showConfirmButton: false
@@ -1144,37 +1592,30 @@ $total_files = count($media_files);
             return;
         }
         
-        if (!$('#contentTitle').val()) {
+        const title = $('#contentTitle').val();
+        if (!title.trim()) {
             Swal.fire('Error', 'Por favor ingresa un título', 'error');
             return;
         }
         
-        // Preparar FormData
+        const uploadBtn = $('#saveBtn');
+        const originalText = uploadBtn.html();
+        
+        uploadBtn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Subiendo...');
+        
         const formData = new FormData();
         formData.append('mediaFile', selectedFile);
-        formData.append('title', $('#contentTitle').val());
+        formData.append('title', title);
         formData.append('description', $('#contentDescription').val());
         formData.append('category', $('#contentCategory').val());
         formData.append('type', $('#contentType').val());
         
-        // Mostrar carga
-        const uploadBtn = $('#uploadBtn');
-        uploadBtn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Subiendo...');
-        
-        // Enviar al handler
         fetch('upload_handler.php', {
             method: 'POST',
             body: formData
         })
-        .then(response => {
-            console.log('Respuesta recibida:', response);
-            if (!response.ok) {
-                throw new Error(`Error HTTP: ${response.status}`);
-            }
-            return response.json();
-        })
+        .then(response => response.json())
         .then(data => {
-            console.log('Datos recibidos:', data);
             if (data.success) {
                 Swal.fire({
                     title: '¡Éxito!',
@@ -1183,39 +1624,196 @@ $total_files = count($media_files);
                     icon: 'success',
                     confirmButtonText: 'OK'
                 }).then(() => {
-                    location.reload();
+                    $('#uploadModal').modal('hide');
+                    setTimeout(() => location.reload(), 500);
                 });
             } else {
                 throw new Error(data.error || 'Error desconocido');
             }
         })
         .catch(error => {
-            console.error('Error completo:', error);
+            console.error('Error:', error);
             Swal.fire({
                 title: 'Error de subida',
-                text: 'No se pudo subir el archivo. Detalles: ' + error.message,
+                text: error.message,
                 icon: 'error',
-                confirmButtonText: 'OK'
+                confirmButtonText: 'Entendido'
             });
-            uploadBtn.prop('disabled', false).html('<i class="fa fa-upload"></i> Subir al SFTP');
+            uploadBtn.prop('disabled', false).html(originalText);
         });
     }
 
-    function playMedia(mediaId) {
+    function saveSpotifyEmbed() {
+        const title = $('#spotifyTitle').val();
+        const embedCode = $('#spotifyEmbedCode').val();
+        const description = $('#spotifyDescription').val();
+        
+        if (!title.trim()) {
+            Swal.fire('Error', 'Por favor ingresa un título', 'error');
+            return;
+        }
+        
+        if (!embedCode.trim()) {
+            Swal.fire('Error', 'Por favor ingresa un código embed', 'error');
+            return;
+        }
+        
+        const saveBtn = $('#saveBtn');
+        saveBtn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Guardando...');
+        
+        fetch('main.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=save_spotify_embed&title=${encodeURIComponent(title)}&embedCode=${encodeURIComponent(embedCode)}&description=${encodeURIComponent(description)}`
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                Swal.fire({
+                    title: '¡Éxito!',
+                    text: 'Embed de Spotify guardado correctamente',
+                    icon: 'success',
+                    confirmButtonText: 'OK'
+                }).then(() => {
+                    $('#uploadModal').modal('hide');
+                    setTimeout(() => location.reload(), 500);
+                });
+            } else {
+                throw new Error(data.error || 'Error al guardar');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            Swal.fire({
+                title: 'Error',
+                text: 'No se pudo guardar el embed. Error: ' + error.message,
+                icon: 'error',
+                confirmButtonText: 'OK'
+            });
+            saveBtn.prop('disabled', false).html('<i class="fa fa-save"></i> Guardar Embed');
+        });
+    }
+
+    function playMedia(mediaId, source, dbId) {
         const media = mediaFiles.find(m => m.id === mediaId);
         
         if (!media) {
-            Swal.fire('Error', 'Archivo no encontrado', 'error');
+            Swal.fire('Error', 'Contenido no encontrado', 'error');
             return;
         }
         
         currentMediaId = mediaId;
+        currentMediaSource = source;
+        currentDbId = dbId;
         
-        if (media.type === 'video') {
+        // Incrementar vistas si hay dbId
+        if (dbId) {
+            incrementViews(dbId);
+        }
+        
+        if (source === 'spotify') {
+            showSpotifyPlayer(media);
+        } else if (media.type === 'video') {
             showVideoPlayer(media);
         } else {
             showAudioPlayer(media);
         }
+    }
+
+    function incrementViews(dbId) {
+        if (!dbId) return;
+        
+        fetch('main.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=increment_views&db_id=${dbId}`
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Actualizar contador en la interfaz
+                const card = document.querySelector(`.media-card[onclick*="${currentMediaId}"]`);
+                if (card) {
+                    const viewsSpan = card.querySelector('.fa-eye').parentElement;
+                    const currentViews = parseInt(viewsSpan.textContent.trim());
+                    viewsSpan.innerHTML = `<i class="fa fa-eye"></i> ${currentViews + 1}`;
+                }
+            }
+        })
+        .catch(console.error);
+    }
+
+    function incrementLikes() {
+        if (!currentDbId) return;
+        
+        fetch('main.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=increment_likes&db_id=${currentDbId}`
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                Swal.fire({
+                    title: '¡Gracias!',
+                    text: 'Tu me gusta ha sido registrado',
+                    icon: 'success',
+                    timer: 1500,
+                    showConfirmButton: false
+                });
+                
+                // Actualizar contador en la interfaz
+                const card = document.querySelector(`.media-card[onclick*="${currentMediaId}"]`);
+                if (card) {
+                    const likesSpan = card.querySelector('.fa-thumbs-up').parentElement;
+                    const currentLikes = parseInt(likesSpan.textContent.trim());
+                    likesSpan.innerHTML = `<i class="fa fa-thumbs-up"></i> ${currentLikes + 1}`;
+                }
+            }
+        })
+        .catch(console.error);
+    }
+
+    function showSpotifyPlayer(media) {
+        $('#playerContainer').html(`
+            <div class="p-4">
+                <h4>${media.title}</h4>
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div class="text-muted">
+                        <span><i class="fa fa-spotify"></i> Spotify Embed</span>
+                        <span class="mx-2">•</span>
+                        <span><i class="fa fa-eye"></i> ${media.views} vistas</span>
+                        <span class="mx-2">•</span>
+                        <span><i class="fa fa-calendar"></i> ${media.date}</span>
+                    </div>
+                    <button class="btn btn-sm btn-outline-success" onclick="incrementLikes()">
+                        <i class="fa fa-thumbs-up"></i> Me gusta (${media.likes})
+                    </button>
+                </div>
+                
+                <div class="embed-container mb-3">
+                    ${media.embed_code}
+                </div>
+                
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">Información</h6>
+                        <p class="card-text">${media.description}</p>
+                        <div class="mt-2">
+                            <small class="text-muted"><i class="fa fa-database"></i> Almacenado en SQL Server</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `);
+        
+        $('#playerModal').modal('show');
     }
 
     function showVideoPlayer(media) {
@@ -1226,10 +1824,13 @@ $total_files = count($media_files);
                     <div class="text-muted">
                         <span><i class="fa fa-file-video-o"></i> Video ${media.extension}</span>
                         <span class="mx-2">•</span>
-                        <span><i class="fa fa-hdd-o"></i> ${formatFileSize(media.size)}</span>
+                        <span><i class="fa fa-eye"></i> ${media.views} vistas</span>
                         <span class="mx-2">•</span>
                         <span><i class="fa fa-calendar"></i> ${media.date}</span>
                     </div>
+                    <button class="btn btn-sm btn-outline-success" onclick="incrementLikes()">
+                        <i class="fa fa-thumbs-up"></i> Me gusta (${media.likes})
+                    </button>
                 </div>
                 
                 <div class="mb-3">
@@ -1244,7 +1845,7 @@ $total_files = count($media_files);
                 
                 <div class="card">
                     <div class="card-body">
-                        <h6 class="card-subtitle mb-2 text-muted">Información del archivo</h6>
+                        <h6 class="card-subtitle mb-2 text-muted">Información</h6>
                         <p class="card-text">${media.description}</p>
                         <div class="mt-2">
                             <small class="text-muted">
@@ -1259,7 +1860,6 @@ $total_files = count($media_files);
         
         $('#playerModal').modal('show');
         
-        // Inicializar reproductor de video
         setTimeout(() => {
             player = videojs('videoPlayer', {
                 controls: true,
@@ -1271,18 +1871,6 @@ $total_files = count($media_files);
         }, 100);
     }
 
-    function getVideoMimeType(extension) {
-        const mimeTypes = {
-            'mp4': 'mp4',
-            'avi': 'x-msvideo',
-            'mov': 'quicktime',
-            'mkv': 'x-matroska',
-            'wmv': 'x-ms-wmv',
-            'webm': 'webm'
-        };
-        return mimeTypes[extension] || 'mp4';
-    }
-
     function showAudioPlayer(media) {
         $('#playerContainer').html(`
             <div class="p-4">
@@ -1291,10 +1879,13 @@ $total_files = count($media_files);
                     <div class="text-muted">
                         <span><i class="fa fa-file-audio-o"></i> Audio ${media.extension}</span>
                         <span class="mx-2">•</span>
-                        <span><i class="fa fa-hdd-o"></i> ${formatFileSize(media.size)}</span>
+                        <span><i class="fa fa-eye"></i> ${media.views} vistas</span>
                         <span class="mx-2">•</span>
                         <span><i class="fa fa-calendar"></i> ${media.date}</span>
                     </div>
+                    <button class="btn btn-sm btn-outline-success" onclick="incrementLikes()">
+                        <i class="fa fa-thumbs-up"></i> Me gusta (${media.likes})
+                    </button>
                 </div>
                 
                 <div class="mb-3 text-center">
@@ -1308,7 +1899,7 @@ $total_files = count($media_files);
                 
                 <div class="card">
                     <div class="card-body">
-                        <h6 class="card-subtitle mb-2 text-muted">Información del archivo</h6>
+                        <h6 class="card-subtitle mb-2 text-muted">Información</h6>
                         <p class="card-text">${media.description}</p>
                         <div class="mt-2">
                             <small class="text-muted">
@@ -1322,6 +1913,18 @@ $total_files = count($media_files);
         `);
         
         $('#playerModal').modal('show');
+    }
+
+    function getVideoMimeType(extension) {
+        const mimeTypes = {
+            'mp4': 'mp4',
+            'avi': 'x-msvideo',
+            'mov': 'quicktime',
+            'mkv': 'x-matroska',
+            'wmv': 'x-ms-wmv',
+            'webm': 'webm'
+        };
+        return mimeTypes[extension] || 'mp4';
     }
 
     function getAudioMimeType(extension) {
@@ -1342,8 +1945,9 @@ $total_files = count($media_files);
         cards.forEach(card => {
             const title = card.querySelector('.media-title').textContent.toLowerCase();
             const type = card.getAttribute('data-type') || '';
+            const source = card.getAttribute('data-source') || '';
             
-            if (title.includes(term) || type.includes(term)) {
+            if (title.includes(term) || type.includes(term) || source.includes(term)) {
                 card.style.display = 'flex';
                 visibleCount++;
             } else {
@@ -1351,7 +1955,6 @@ $total_files = count($media_files);
             }
         });
         
-        // Mostrar mensaje si no hay resultados
         const noResults = document.getElementById('noResults');
         if (visibleCount === 0 && cards.length > 0) {
             if (!noResults) {
@@ -1384,16 +1987,27 @@ $total_files = count($media_files);
     }
 
     function resetUploadForm() {
-        $('#uploadForm')[0].reset();
+        $('#uploadForm, #spotifyForm')[0].reset();
         $('#mediaPreviewContainer').hide();
-        resetPreview();
-        $('#uploadBtn').prop('disabled', true).html('<i class="fa fa-upload"></i> Subir al SFTP');
+        $('#spotifyPreview').html('<p class="text-muted mb-0">El contenido de Spotify aparecerá aquí</p>');
+        resetSaveButton();
         selectedFile = null;
+        currentEmbedData = null;
         
-        // Reset file input
         const fileInput = document.getElementById('mediaFile');
         if (fileInput) {
             fileInput.value = '';
+        }
+        
+        $('#file-tab').tab('show');
+    }
+
+    function resetSaveButton() {
+        $('#saveBtn').prop('disabled', true);
+        if (currentTab === 'file') {
+            $('#saveBtn').html('<i class="fa fa-upload"></i> Subir Archivo');
+        } else {
+            $('#saveBtn').html('<i class="fa fa-save"></i> Guardar Embed');
         }
     }
 
@@ -1429,7 +2043,6 @@ $total_files = count($media_files);
         }
     }
 
-    // Atajos de teclado
     document.addEventListener('keydown', function(event) {
         if (event.key === 'F1') {
             event.preventDefault();
@@ -1448,7 +2061,6 @@ $total_files = count($media_files);
 </body>
 </html>
 <?php
-// Función para formatear tamaño de archivo
 function formatFileSize($bytes) {
     if ($bytes === 0) return '0 Bytes';
     $k = 1024;
