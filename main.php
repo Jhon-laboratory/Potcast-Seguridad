@@ -289,7 +289,7 @@ function getSpotifyEmbeds() {
                 'type' => 'audio',
                 'extension' => 'SPOTIFY',
                 'url' => 'javascript:void(0)',
-                'thumbnail' => 'https://images.unsplash.com/photo-1611339555312-e607c8352fd7?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80'
+                'thumbnail' => 'img/hse1.png'
             ];
         }
         
