@@ -1,6 +1,5 @@
 <?php
-// upload_handler.php
-session_start();
+
 
 // DESACTIVAR ERRORES EN PRODUCCIÓN
 ini_set('display_errors', 0);
