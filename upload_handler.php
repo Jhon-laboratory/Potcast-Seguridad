@@ -1,10 +1,17 @@
 <?php
-
+// upload_handler.php
+session_start();
 
 // DESACTIVAR ERRORES EN PRODUCCIÓN
 ini_set('display_errors', 0);
 error_reporting(0);
 
+// Verificar sesión
+if (!isset($_SESSION['usuario'])) {
+    header('Content-Type: application/json');
+    echo json_encode(['success' => false, 'error' => 'No autorizado']);
+    exit;
+}
 
 // ===== CONFIGURACIÓN SQL SERVER =====
 $host = 'Jorgeserver.database.windows.net';
